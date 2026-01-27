@@ -3,7 +3,7 @@ repos:
     rev: v2.4.1
     hooks:
       - id: codespell
-        exclude: pnpm-lock.yaml
+        exclude: ^(pnpm-lock.yaml|Cargo.lock)$
   - repo: local
     hooks:
       - id: biome-check
