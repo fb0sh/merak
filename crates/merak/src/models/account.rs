@@ -1,8 +1,9 @@
 use merak_macros::Model;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
+use surrealdb::RecordId;
 
-#[derive(Model, Serialize, Deserialize, ToSchema)]
+#[derive(Model, Serialize, Deserialize)]
 pub struct Account {
-    // id: RecordId,
+    #[field(primary)]
+    pub id: RecordId,
 }

@@ -9,7 +9,10 @@ pub struct ModelArgs {
 #[derive(Default, FromField)]
 #[darling(default, attributes(field))]
 pub struct FieldArgs {
+    pub primary: bool,
     pub foreign_key: Option<syn::Ident>,
+    // pub created_at: bool,
+    // pub updated_at: bool,
 }
 
 impl FieldArgs {

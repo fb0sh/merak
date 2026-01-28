@@ -30,6 +30,8 @@ pub fn merak_model(input: TokenStream) -> TokenStream {
 fn expand_model(input: DeriveInput) -> syn::Result<TokenStream> {
     let vis = &input.vis;
     let ident = &input.ident;
+    let ident_name = ident.to_string();
+
     let fields = match &input.data {
         syn::Data::Struct(data) => (&data.fields).into_iter(),
         _ => {
@@ -40,7 +42,6 @@ fn expand_model(input: DeriveInput) -> syn::Result<TokenStream> {
         }
     };
 
-    let ident_name = ident.to_string();
     let foreign_methods = fields.clone().try_fold(vec![], |mut acc, field| {
         let field_ident = field.ident.as_ref().unwrap();
         let method_ident = Ident::new(&field_ident.to_string().replace("_id", ""), ident.span());
@@ -56,24 +57,99 @@ fn expand_model(input: DeriveInput) -> syn::Result<TokenStream> {
                     client.select(&self.#field_ident).await
                 }
             });
-        };
+        } else if field_args.is_foreign_key() {
+            return Err(syn::Error::new(ident.span(), "Foreign key field must be of type `RecordId`"));
+        }
         Ok::<_, syn::Error>(acc)
     })?;
 
     let model_args = ModelArgs::from_derive_input(&input)?;
 
+    let input_ident = Ident::new(&format!("{}Input", ident), ident.span());
+    let input_fields = fields
+        .clone()
+        .filter(|field| {
+            let field_args = FieldArgs::from_field(field).unwrap();
+            // !field_args.primary && !field_args.created_at && !field_args.updated_at
+            !field_args.primary
+        })
+        .map(|field| {
+            let mut field = field.clone();
+            field.attrs.retain(|attr| !attr.path().is_ident("field"));
+            field
+        });
+
+    let data_ident = Ident::new(&format!("{}Data", ident), ident.span());
+    let data_fields = fields.clone().map(|field| {
+        let mut field = field.clone();
+        if is_record_id(&field.ty) {
+            field.ty = syn::parse_quote!(String);
+        }
+        field.attrs.retain(|attr| !attr.path().is_ident("field"));
+        field
+    });
+    let covert_data_fields = fields.clone().map(|field| {
+        let field_ident = field.ident.as_ref().unwrap();
+        if is_record_id(&field.ty) {
+            quote! {
+                #field_ident: model.#field_ident.to_string()
+            }
+        } else {
+            quote! {
+                #field_ident: model.#field_ident
+            }
+        }
+    });
+    let convert_impl = quote! {
+        impl From<#ident> for #data_ident {
+            fn from(model: #ident) -> Self {
+                #data_ident {
+                    #(#covert_data_fields),*
+                }
+            }
+        }
+    };
+
     let table_name = model_args.table_name.unwrap_or(ident_name.to_snake_case());
 
-    Ok(quote! {
-        impl #ident {
-            #vis fn table_name() -> &'static str { #table_name }
+    #[cfg(feature = "utoipa")]
+    let data_struct = quote! {
+        #[derive(::serde::Serialize, ::serde::Deserialize, ::utoipa::ToSchema)]
+        #vis struct #data_ident {
+            #(#data_fields),*
+        }
+    };
+    #[cfg(not(feature = "utoipa"))]
+    let data_struct = quote! {
+        #[derive(::serde::Serialize, ::serde::Deserialize)]
+        #vis struct #data_ident {
+            #(#data_fields),*
+        }
+    };
 
-            #vis async fn create(db: &::merak_core::SurrealClient, data: Self) -> surrealdb::Result<Option<Self>> {
-                db.create(Self::table_name()).content(data).await
+    Ok(quote! {
+        #[derive(::serde::Serialize, ::serde::Deserialize)]
+        #vis struct #input_ident {
+            #(#input_fields),*
+        }
+
+        #data_struct
+
+        #convert_impl
+
+        impl #ident {
+            const TABLE_NAME: &'static str = #table_name;
+
+            #vis fn table_name(&self) -> &'static str { Self::TABLE_NAME }
+
+            #vis fn into_data(self) -> #data_ident { self.into() }
+
+            #vis async fn create(db: &::merak_core::SurrealClient, data: #input_ident) -> surrealdb::Result<Option<Self>> {
+                db.create(Self::TABLE_NAME).content(data).await
             }
 
-            #vis async fn create_with_id(db: &::merak_core::SurrealClient, id: String, data: Self) -> surrealdb::Result<Option<Self>> {
-                db.create((Self::table_name(), id)).content(data).await
+            #vis async fn create_with_id(db: &::merak_core::SurrealClient, id: String, data: #input_ident) -> surrealdb::Result<Option<Self>> {
+                db.create((Self::TABLE_NAME, id)).content(data).await
             }
 
             #(#foreign_methods)*

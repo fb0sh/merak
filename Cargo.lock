@@ -2188,6 +2188,7 @@ dependencies = [
  "serde",
  "surrealdb",
  "syn 2.0.114",
+ "utoipa",
 ]
 
 [[package]]
