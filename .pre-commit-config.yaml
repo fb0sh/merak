@@ -18,3 +18,10 @@ repos:
         language: system
         types: [text]
         files: "\\.(rs)$"
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: cargo clippy --all-targets --all-features -- -D warnings
+        language: system
+        types: [text]
+        files: "\\.(rs)$"
+        pass_filenames: false
