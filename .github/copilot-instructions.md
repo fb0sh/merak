@@ -90,7 +90,7 @@ When adding scripts or changing behavior, make sure they integrate cleanly with 
 - All Rust code changes must compile cleanly and fully pass `cargo clippy` with no warnings or errors. Do not introduce any `unsafe` code anywhere in the workspace.
 - Run `cargo build` and `cargo test` for crates you modify.
 
-### Merak Macros (crates/macros)
+### merak-macros (crates/macros)
 
 The repository contains a set of macros used by Merak Backend.
 
@@ -98,7 +98,9 @@ The repository contains a set of macros used by Merak Backend.
   - Modify them only with extreme caution, coordinate with maintainers
   - Ensure backward-compatible generated outputs whenever possible.
 
-### Merak Backend (crates/merak)
+### merak (crates/merak)
+
+Server-side Rust crate for Merak Backend.
 
 - Keep the file structure simple and modular:
   - Place HTTP handlers in `routes/`, domain models in `models/`

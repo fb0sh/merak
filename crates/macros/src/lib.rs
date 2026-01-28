@@ -1,6 +1,7 @@
 use darling::{FromDeriveInput, FromField};
 use heck::ToSnakeCase;
 use proc_macro::TokenStream;
+use proc_macro2::Span;
 use quote::quote;
 use syn::{DeriveInput, Ident, parse_macro_input};
 
@@ -32,6 +33,7 @@ fn expand_model(input: DeriveInput) -> syn::Result<TokenStream> {
     let ident = &input.ident;
     let ident_name = ident.to_string();
 
+    let model_args = ModelArgs::from_derive_input(&input)?;
     let fields = match &input.data {
         syn::Data::Struct(data) => (&data.fields).into_iter(),
         _ => {
@@ -62,8 +64,6 @@ fn expand_model(input: DeriveInput) -> syn::Result<TokenStream> {
         }
         Ok::<_, syn::Error>(acc)
     })?;
-
-    let model_args = ModelArgs::from_derive_input(&input)?;
 
     let input_ident = Ident::new(&format!("{}Input", ident), ident.span());
     let input_fields = fields
@@ -127,7 +127,41 @@ fn expand_model(input: DeriveInput) -> syn::Result<TokenStream> {
         }
     };
 
+    let primary_key = fields.clone().find_map(|field| {
+        let field_args = FieldArgs::from_field(field).unwrap();
+        if field_args.primary {
+            Some(field.ident.as_ref().unwrap())
+        } else {
+            None
+        }
+    });
+
+    let get_by_primary_key = if let Some(primary_key) = primary_key {
+        let primary_ident = Ident::new(&format!("get_by_{}", primary_key), Span::call_site());
+        quote! {
+            #vis async fn #primary_ident(db: &::merak_core::SurrealClient, id: String) -> surrealdb::Result<Option<Self>> {
+                db.select((Self::TABLE_NAME, id)).await
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    let operations = if let Some(primary_key) = primary_key {
+        let primary_ident = Ident::new(&primary_key.to_string(), Span::call_site());
+        quote! {
+            #vis async fn save(self, client: &::merak_core::SurrealClient) -> surrealdb::Result<Option<Self>> {
+                client.update(self.#primary_ident.clone()).content(self).await
+            }
+
+        }
+    } else {
+        quote! {}
+    };
+
     Ok(quote! {
+        use ::merak_core::prelude::*;
+
         #[derive(::serde::Serialize, ::serde::Deserialize)]
         #vis struct #input_ident {
             #(#input_fields),*
@@ -137,20 +171,19 @@ fn expand_model(input: DeriveInput) -> syn::Result<TokenStream> {
 
         #convert_impl
 
-        impl #ident {
+        impl ::merak_core::Model for #ident {
             const TABLE_NAME: &'static str = #table_name;
+            type Data = #data_ident;
 
-            #vis fn table_name(&self) -> &'static str { Self::TABLE_NAME }
+            fn table_name(&self) -> &'static str { Self::TABLE_NAME }
 
-            #vis fn into_data(self) -> #data_ident { self.into() }
+            fn into_data(self) -> #data_ident { self.into() }
+        }
 
-            #vis async fn create(db: &::merak_core::SurrealClient, data: #input_ident) -> surrealdb::Result<Option<Self>> {
-                db.create(Self::TABLE_NAME).content(data).await
-            }
+        impl #ident {
+            #get_by_primary_key
 
-            #vis async fn create_with_id(db: &::merak_core::SurrealClient, id: String, data: #input_ident) -> surrealdb::Result<Option<Self>> {
-                db.create((Self::TABLE_NAME, id)).content(data).await
-            }
+            #operations
 
             #(#foreign_methods)*
         }
