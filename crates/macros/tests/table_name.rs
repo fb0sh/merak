@@ -22,7 +22,7 @@ pub fn specified_table_name() {
 #[test]
 pub fn foreign_key_method() {
     #[derive(Model, Serialize, Deserialize)]
-    #[model(table_name = "any_table")]
+    #[model(table_name = "other_table")]
     struct OtherModel {
         id: RecordId,
     }
