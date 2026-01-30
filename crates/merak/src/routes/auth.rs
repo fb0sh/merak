@@ -244,21 +244,27 @@ pub async fn refresh_token(
 ) -> Response {
     let auth_service = state.auth_service.as_ref();
 
-    match auth_service.refresh_token(req.refresh_token) {
+    match auth_service
+        .refresh_token(&state.db, req.refresh_token)
+        .await
+    {
         Ok(tokens) => (
             StatusCode::OK,
             Json(ApiResponse::ok(RefreshTokenResponse { tokens })),
         )
             .into_response(),
         Err(e) => {
-            let status = if e.to_string().contains("Invalid") || e.to_string().contains("expired") {
+            let message = e.to_string();
+            let status = if message.contains("Invalid")
+                || message.contains("expired")
+                || message.contains("revoked")
+                || message.contains("Session")
+            {
                 StatusCode::UNAUTHORIZED
             } else {
                 StatusCode::INTERNAL_SERVER_ERROR
             };
-            let error_response = ErrorResponse {
-                message: e.to_string(),
-            };
+            let error_response = ErrorResponse { message };
             (status, Json(error_response)).into_response()
         }
     }
@@ -266,27 +272,47 @@ pub async fn refresh_token(
 
 /// User logout
 ///
-/// Client should delete stored tokens (server uses stateless JWT, no additional processing needed)
+/// Invalidate the current session token on the server
 #[utoipa::path(
     post,
     path = "/logout",
     responses(
         (status = 200, description = "Logout successful", body = ApiResponse<EmptyData>),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    security(
+        ("bearer_auth" = [])
     ),
     tag = "Authentication"
 )]
-pub async fn logout() -> impl IntoResponse {
-    // Since we use stateless JWT, the server doesn't need to maintain session state
-    // The client should delete locally stored tokens
-    (
-        StatusCode::OK,
-        Json(ApiResponse::new(
-            CODE_OK,
-            "Logged out successfully",
-            EmptyData::default(),
-        )),
-    )
+pub async fn logout(State(state): State<AuthState>, BearerToken(bearer): BearerToken) -> Response {
+    let auth_service = state.auth_service.as_ref();
+
+    let token = bearer.token();
+    match auth_service.logout(&state.db, token).await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(ApiResponse::new(
+                CODE_OK,
+                "Logged out successfully",
+                EmptyData::default(),
+            )),
+        )
+            .into_response(),
+        Err(e) => {
+            let message = e.to_string();
+            let status = if message.contains("Invalid")
+                || message.contains("expired")
+                || message.contains("Session")
+            {
+                StatusCode::UNAUTHORIZED
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (status, Json(ErrorResponse { message })).into_response()
+        }
+    }
 }
 
 /// Get current user information
@@ -313,8 +339,8 @@ pub async fn get_me(State(state): State<AuthState>, BearerToken(bearer): BearerT
     let token = bearer.token();
 
     // Verify token and get user ID
-    let user_id = match auth_service.extract_user_id(token) {
-        Ok(id) => id,
+    let claims = match auth_service.verify_access_token(&state.db, token).await {
+        Ok(claims) => claims,
         Err(e) => {
             return (
                 StatusCode::UNAUTHORIZED,
@@ -327,7 +353,7 @@ pub async fn get_me(State(state): State<AuthState>, BearerToken(bearer): BearerT
     };
 
     // Get user information
-    match auth_service.get_user(&state.db, &user_id).await {
+    match auth_service.get_user(&state.db, &claims.sub).await {
         Ok(user) => (
             StatusCode::OK,
             Json(ApiResponse::ok(UserResponse::from(user))),

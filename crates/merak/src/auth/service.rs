@@ -6,6 +6,7 @@ use surrealdb::RecordId;
 use super::{
     jwt::{JwtService, TokenPair},
     password::PasswordService,
+    session::SessionService,
 };
 use crate::models::user::{User, UserInput};
 
@@ -13,6 +14,7 @@ use crate::models::user::{User, UserInput};
 pub struct AuthService {
     jwt_service: JwtService,
     password_service: PasswordService,
+    session_service: SessionService,
 }
 
 impl AuthService {
@@ -21,6 +23,7 @@ impl AuthService {
         Self {
             jwt_service,
             password_service,
+            session_service: SessionService::new(),
         }
     }
 
@@ -29,6 +32,7 @@ impl AuthService {
         Self {
             jwt_service: JwtService::default(),
             password_service: PasswordService::default(),
+            session_service: SessionService::new(),
         }
     }
 
@@ -37,6 +41,7 @@ impl AuthService {
         Self {
             jwt_service: JwtService::from_env(),
             password_service: PasswordService::default(),
+            session_service: SessionService::new(),
         }
     }
 
@@ -103,11 +108,16 @@ impl AuthService {
 
         let user = created.ok_or_else(|| anyhow!("Failed to create user"))?;
 
-        // Generate tokens
+        let session = self
+            .session_service
+            .create_session(db, &user.id, self.jwt_service.refresh_exp_seconds())
+            .await?;
         let token_pair = self.jwt_service.generate_token_pair(
             &user.id.to_string(),
             &user.username,
             &user.email,
+            &session.session_id,
+            &session.refresh_jti,
         )?;
 
         Ok((user, token_pair))
@@ -147,11 +157,19 @@ impl AuthService {
             return Err(anyhow!("Invalid credentials"));
         }
 
-        // Generate tokens
+        self.session_service
+            .cleanup_expired_for_user(db, &user.id)
+            .await?;
+        let session = self
+            .session_service
+            .create_session(db, &user.id, self.jwt_service.refresh_exp_seconds())
+            .await?;
         let token_pair = self.jwt_service.generate_token_pair(
             &user.id.to_string(),
             &user.username,
             &user.email,
+            &session.session_id,
+            &session.refresh_jti,
         )?;
 
         Ok((user, token_pair))
@@ -160,18 +178,46 @@ impl AuthService {
     /// Refresh tokens
     ///
     /// # Arguments
+    /// - `db`: Database client
     /// - `refresh_token`: Refresh token
     ///
     /// # Returns
     /// New token pair
-    pub fn refresh_token(&self, refresh_token: String) -> Result<TokenPair> {
+    pub async fn refresh_token(
+        &self,
+        db: &SurrealClient,
+        refresh_token: String,
+    ) -> Result<TokenPair> {
         // Verify refresh token
         let claims = self.jwt_service.verify_refresh_token(&refresh_token)?;
+        let refresh_jti = claims
+            .jti
+            .clone()
+            .ok_or_else(|| anyhow!("Refresh token missing jti"))?;
+        let session = self
+            .session_service
+            .load_active_session(db, &claims.sid)
+            .await?;
+        if session.user_id.to_string() != claims.sub {
+            return Err(anyhow!("Session user mismatch"));
+        }
+        if session.refresh_jti != refresh_jti {
+            return Err(anyhow!("Refresh token revoked"));
+        }
+
+        let new_refresh_jti = self
+            .session_service
+            .rotate_refresh_jti(db, session, self.jwt_service.refresh_exp_seconds())
+            .await?;
 
         // Generate new token pair
-        let token_pair =
-            self.jwt_service
-                .generate_token_pair(&claims.sub, &claims.username, &claims.email)?;
+        let token_pair = self.jwt_service.generate_token_pair(
+            &claims.sub,
+            &claims.username,
+            &claims.email,
+            &claims.sid,
+            &new_refresh_jti,
+        )?;
 
         Ok(token_pair)
     }
@@ -183,8 +229,20 @@ impl AuthService {
     ///
     /// # Returns
     /// Token claims
-    pub fn verify_access_token(&self, access_token: String) -> Result<super::jwt::Claims> {
-        self.jwt_service.verify_access_token(&access_token)
+    pub async fn verify_access_token(
+        &self,
+        db: &SurrealClient,
+        access_token: &str,
+    ) -> Result<super::jwt::Claims> {
+        let claims = self.jwt_service.verify_access_token(access_token)?;
+        let session = self
+            .session_service
+            .load_active_session(db, &claims.sid)
+            .await?;
+        if session.user_id.to_string() != claims.sub {
+            return Err(anyhow!("Session user mismatch"));
+        }
+        Ok(claims)
     }
 
     /// Extract user ID from token
@@ -194,8 +252,19 @@ impl AuthService {
     ///
     /// # Returns
     /// User ID
-    pub fn extract_user_id(&self, access_token: &str) -> Result<String> {
-        self.jwt_service.extract_user_id(access_token)
+    pub async fn extract_user_id(&self, db: &SurrealClient, access_token: &str) -> Result<String> {
+        let claims = self.verify_access_token(db, access_token).await?;
+        Ok(claims.sub)
+    }
+
+    /// Logout current session
+    ///
+    /// # Arguments
+    /// - `db`: Database client
+    /// - `access_token`: Access token
+    pub async fn logout(&self, db: &SurrealClient, access_token: &str) -> Result<()> {
+        let claims = self.verify_access_token(db, access_token).await?;
+        self.session_service.delete_session(db, &claims.sid).await
     }
 
     /// Get user information
